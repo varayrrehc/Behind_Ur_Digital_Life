@@ -626,13 +626,28 @@ def get_risk_and_grade(score):
 # MODULE 2: DATA BREACH INTEL
 # ------------------------------------------------------------
 
+GLOBAL_BREACH_METADATA = {}
+
 def check_breaches(email_input):
+    global GLOBAL_BREACH_METADATA
     clean = email_input.strip().lower()
     if "@" not in clean:
         return {"is_email": False, "found": False, "count": 0, "breaches": []}
 
     email_md5 = hashlib.md5(clean.encode('utf-8')).hexdigest()
     gravatar_url = f"https://www.gravatar.com/avatar/{email_md5}?d=identicon&s=150"
+
+    # Fetch global metadata if empty
+    if not GLOBAL_BREACH_METADATA:
+        try:
+            req_meta = urllib.request.Request("https://api.xposedornot.com/v1/breaches", headers={"User-Agent": "Mozilla/5.0 BehindUrDigitalLife/6.0"})
+            with urllib.request.urlopen(req_meta, timeout=5) as r:
+                if r.status == 200:
+                    data = json.loads(r.read().decode("utf-8"))
+                    for b in data.get("exposedBreaches", []):
+                        GLOBAL_BREACH_METADATA[b.get("breachID", "")] = b
+        except Exception:
+            pass
 
     encoded = urllib.parse.quote(clean)
     api_url = f"https://api.xposedornot.com/v1/check-email/{encoded}"
@@ -651,13 +666,23 @@ def check_breaches(email_input):
 
                 formatted_breaches = []
                 for b in breach_names:
+                    meta = GLOBAL_BREACH_METADATA.get(str(b), {})
+                    domain = meta.get("domain", f"{str(b).lower().replace(' ', '')}.com")
+                    date = meta.get("breachedDate", "Historical Leak")
+                    if date and "T" in date:
+                        date = date.split("T")[0]
+                    
+                    data_leaked = ", ".join(meta.get("exposedData", ["Passwords", "Emails"]))
+                    desc = meta.get("exposureDescription", f"Credentials associated with {clean} were published in the {b} database dump.")
+                    logo = meta.get("logo", f"https://logo.clearbit.com/{domain}")
+
                     formatted_breaches.append({
                         "breach": str(b),
-                        "domain": f"{str(b).lower().replace(' ', '')}.com",
-                        "xposed_date": "Historical Leak",
-                        "xposed_data": "Passwords, Emails, Usernames, IP addresses",
-                        "details": f"Credentials associated with {clean} were published in the {b} database dump.",
-                        "logo": f"https://logo.clearbit.com/{str(b).lower().replace(' ', '')}.com"
+                        "domain": domain,
+                        "xposed_date": date,
+                        "xposed_data": data_leaked,
+                        "details": desc,
+                        "logo": logo
                     })
                 return {
                     "is_email": True,
