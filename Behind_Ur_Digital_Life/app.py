@@ -641,7 +641,8 @@ def check_breaches(email_input):
     if not GLOBAL_BREACH_METADATA:
         try:
             req_meta = urllib.request.Request("https://api.xposedornot.com/v1/breaches", headers={"User-Agent": "Mozilla/5.0 BehindUrDigitalLife/6.0"})
-            with urllib.request.urlopen(req_meta, timeout=5) as r:
+            ctx_meta = get_doh_ssl_context()
+            with urllib.request.urlopen(req_meta, context=ctx_meta, timeout=8) as r:
                 if r.status == 200:
                     data = json.loads(r.read().decode("utf-8"))
                     for b in data.get("exposedBreaches", []):
@@ -675,6 +676,8 @@ def check_breaches(email_input):
                     data_leaked = ", ".join(meta.get("exposedData", ["Passwords", "Emails"]))
                     desc = meta.get("exposureDescription", f"Credentials associated with {clean} were published in the {b} database dump.")
                     logo = meta.get("logo", f"https://logo.clearbit.com/{domain}")
+                    industry = meta.get("industry", "Unknown")
+                    records = meta.get("exposedRecords", 0)
 
                     formatted_breaches.append({
                         "breach": str(b),
@@ -682,7 +685,9 @@ def check_breaches(email_input):
                         "xposed_date": date,
                         "xposed_data": data_leaked,
                         "details": desc,
-                        "logo": logo
+                        "logo": logo,
+                        "industry": industry,
+                        "records": f"{records:,}" if records else "Unknown"
                     })
                 return {
                     "is_email": True,
@@ -3635,17 +3640,23 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
                         b_logo = safe(b.get("logo", ""))
                         logo_html = f'<img src="{b_logo}" alt="logo" class="breach-logo" onerror="this.style.display=&quot;none&quot;">' if b_logo else ''
                         cards_html += f"""
-                        <div class="breach-item-card">
+                        <a href="https://www.google.com/search?q={urllib.parse.quote(b.get("breach", "Service") + ' data breach')}" target="_blank" style="text-decoration:none; color:inherit;">
+                        <div class="breach-item-card" style="cursor:pointer; transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.5)';" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none';">
                             <div class="breach-card-top">
                                 {logo_html}
                                 <div>
                                     <h5 class="breach-title">{safe(b.get("breach", "Service"))}</h5>
                                     <div class="breach-domain">{safe(b.get("domain", ""))} &bull; <span class="breach-year">{safe(b.get("xposed_date", ""))}</span></div>
+                                    <div style="font-size:11px; color:#94a3b8; margin-top:3px;">
+                                        Industry: <span style="color:#e2e8f0;">{safe(b.get("industry", "Unknown"))}</span> &bull; 
+                                        Records Leaked: <span style="color:#ef4444; font-weight:bold;">{safe(b.get("records", "Unknown"))}</span>
+                                    </div>
                                 </div>
                             </div>
-                            <div class="breach-tags">{format_data_tags(b.get("xposed_data", ""))}</div>
-                            <p class="breach-desc">{safe(b.get("details", ""))}</p>
+                            <div class="breach-tags" style="margin-top:10px;">{format_data_tags(b.get("xposed_data", ""))}</div>
+                            <p class="breach-desc" style="margin-top:8px;">{safe(b.get("details", ""))}</p>
                         </div>
+                        </a>
                         """
                     breach_section = f"""
                     <div class="card breach-container breach-alert">
