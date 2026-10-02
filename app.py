@@ -11,6 +11,25 @@ import os
 import re
 import socket
 import sqlite3
+import os
+
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_database.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS strength_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, strength_score TEXT)''')
+    conn.commit()
+    conn.close()
+
+def log_safe_check(score):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO strength_checks (strength_score) VALUES (?)", (score,))
+    conn.commit()
+    conn.close()
+
+init_db()
 import ssl
 import struct
 import threading
@@ -46,9 +65,9 @@ class VirtualDatabase:
         self.lock = threading.Lock()
         self.conn = sqlite3.connect("security_data.db", check_same_thread=False)
 
-self.conn.execute("PRAGMA journal_mode=WAL")
-self.conn.execute("PRAGMA foreign_keys=ON")
-self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.cursor = self.conn.cursor()
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS visitor_telemetry (
@@ -1864,36 +1883,69 @@ def analyze_password_strength(password):
 
     score = max(0, min(100, score))
 
+    # Exact mathematical crack time
+    charset_size = 0
+    if has_lower: charset_size += 26
+    if has_upper: charset_size += 26
+    if has_digit: charset_size += 10
+    if has_special or has_space: charset_size += 33
+    if charset_size == 0: charset_size = 26
+
+    combinations = charset_size ** length
+    hashes_per_sec = 100_000_000_000
+    seconds = combinations / hashes_per_sec
+
+    if is_common:
+        exact_crack_time = "Instant (Found in breach dictionary)"
+    elif seconds < 1:
+        exact_crack_time = "Instant (under 1 second)"
+    elif seconds < 60:
+        exact_crack_time = f"{int(seconds)} seconds"
+    elif seconds < 3600:
+        exact_crack_time = f"{int(seconds / 60)} minutes"
+    elif seconds < 86400:
+        exact_crack_time = f"{int(seconds / 3600)} hours"
+    elif seconds < 31536000:
+        exact_crack_time = f"{int(seconds / 86400)} days"
+    else:
+        years = seconds / 31536000
+        if years > 1_000_000_000:
+            exact_crack_time = f"{int(years / 1_000_000_000):,} billion years"
+        elif years > 1_000_000:
+            exact_crack_time = f"{int(years / 1_000_000):,} million years"
+        else:
+            exact_crack_time = f"{int(years):,} years"
+
     # Determine strength tier
     if score >= 80:
         strength = "VERY STRONG"
         strength_color = "#00ffab"
         grade = "A+"
-        crack_time = "Centuries (100+ years with current hardware)"
+        crack_time = exact_crack_time
         verdict = "Excellent password! This is highly resistant to automated cracking tools, brute force, and dictionary attacks."
     elif score >= 65:
         strength = "STRONG"
         strength_color = "#34d399"
         grade = "A"
-        crack_time = "Years to decades"
+        crack_time = exact_crack_time
         verdict = "Strong password. Minor improvements would make it uncrackable for foreseeable future."
     elif score >= 50:
         strength = "MODERATE"
         strength_color = "#facc15"
         grade = "B"
-        crack_time = "Days to weeks (with GPU cracking rigs)"
+        crack_time = exact_crack_time
         verdict = "Acceptable but improvable. Add length and special characters."
     elif score >= 30:
         strength = "WEAK"
         strength_color = "#f97316"
         grade = "C"
-        crack_time = "Minutes to hours"
+        crack_time = exact_crack_time
         verdict = "Weak password. A basic cracking tool would break this in under an hour."
     else:
         strength = "CRITICALLY WEAK"
         strength_color = "#ef4444"
         grade = "F"
-        crack_time = "Under 1 second to a few seconds"
+        crack_time = exact_crack_time
         verdict = "DANGER: This password provides virtually no security. Change it immediately!"
 
     # High-security password instructions
@@ -5129,6 +5181,7 @@ button:hover {{ background: #00ffab; box-shadow: 0 0 12px rgba(0, 255, 171, 0.4)
     <a href="/?tab=image" class="nav-item {t_active['image']}"><div class="nav-item-left"><span class="nav-icon">🔍</span> Reverse Image & Stego</div></a>
     <a href="/?tab=code" class="nav-item {t_active['code']}"><div class="nav-item-left"><span class="nav-icon">🦠</span> Malicious Code Analyzer</div></a>
     <a href="/?tab=forensics" class="nav-item {t_active['forensics']}"><div class="nav-item-left"><span class="nav-icon">🧰</span> Digital Forensic Toolkit</div></a>
+    <a href="/?tab=password" class="nav-item {t_active['password']}"><div class="nav-item-left"><span class="nav-icon">🔑</span> Password Strength Checker</div></a>
     <a href="/?tab=email" class="nav-item {t_active['email']}"><div class="nav-item-left"><span class="nav-icon">✉️</span> Email Security Analyzer</div></a>
     <a href="/?tab=url" class="nav-item {t_active['url']}"><div class="nav-item-left"><span class="nav-icon">🌐</span> Website & URL Phishing</div></a>
     <a href="/?tab=ip" class="nav-item {t_active['ip']}"><div class="nav-item-left"><span class="nav-icon">🛰️</span> IP Intelligence & Ports</div></a>
@@ -5239,6 +5292,18 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        
+        # --- LOCALHOST RESTRICTION ---
+        if parsed.path.startswith("/admin"):
+            client_ip = self.client_address[0]
+            if client_ip not in ('127.0.0.1', '::1', 'localhost'):
+                self.send_response(403)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b"403 Forbidden: Admin access is strictly limited to localhost.")
+                print(f"[!] Blocked unauthorized admin access attempt from IP: {client_ip}")
+                return
+        # --- END RESTRICTION ---
         params = parse_qs(parsed.query)
 
         if parsed.path == "/favicon.ico":
@@ -5652,6 +5717,13 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
             pwd = post_params.get("check_password", "")
             pwd_strength = analyze_password_strength(pwd)
             summary = f"Strength: {pwd_strength.get('strength','N/A')}, Score: {pwd_strength.get('score',0)}/100, Issues: {len(pwd_strength.get('issues',[]))}"
+            
+            # --- START SAFE LOGGING ---
+            try:
+                log_safe_check(f"Score: {pwd_strength.get('score',0)}/100, Grade: {pwd_strength.get('grade','N/A')}")
+            except Exception as e:
+                print(f"[!] DB Log Error: {e}")
+            # --- END SAFE LOGGING ---
             data_given = f"Grade: {pwd_strength.get('grade','N/A')} | Crack Time: {pwd_strength.get('crack_time','N/A')} | Common: {pwd_strength.get('is_common',False)}"
             state_after = VIRTUAL_DB.get_state_snapshot()
             VIRTUAL_DB.log_activity(client_ip, client_port, ua, is_vpn, vpn_alert, vpn_name, vpn_address, state_before, state_after, "Password Strength", "Password analyzed (hidden)", data_given, summary)
@@ -5710,3 +5782,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nShutting down suite...")
         server.server_close()
+
