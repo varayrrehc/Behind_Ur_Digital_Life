@@ -11,6 +11,27 @@ import os
 import re
 import socket
 import sqlite3
+import os
+
+DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database")
+os.makedirs(DB_DIR, exist_ok=True)
+DB_FILE = os.path.join(DB_DIR, "tool_database.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS strength_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, strength_score TEXT)''')
+    conn.commit()
+    conn.close()
+
+def log_safe_check(score):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO strength_checks (strength_score) VALUES (?)", (score,))
+    conn.commit()
+    conn.close()
+
+init_db()
 import ssl
 import struct
 import threading
@@ -44,7 +65,11 @@ class VirtualDatabase:
     """
     def __init__(self):
         self.lock = threading.Lock()
-        self.conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self.conn = sqlite3.connect("security_data.db", check_same_thread=False)
+
+self.conn.execute("PRAGMA journal_mode=WAL")
+self.conn.execute("PRAGMA foreign_keys=ON")
+self.conn.execute("PRAGMA busy_timeout=5000")
         self.cursor = self.conn.cursor()
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS visitor_telemetry (
@@ -5235,6 +5260,18 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        
+        # --- LOCALHOST RESTRICTION ---
+        if parsed.path.startswith("/admin"):
+            client_ip = self.client_address[0]
+            if client_ip not in ('127.0.0.1', '::1', 'localhost'):
+                self.send_response(403)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b"403 Forbidden: Admin access is strictly limited to localhost.")
+                print(f"[!] Blocked unauthorized admin access attempt from IP: {client_ip}")
+                return
+        # --- END RESTRICTION ---
         params = parse_qs(parsed.query)
 
         if parsed.path == "/favicon.ico":
@@ -5648,6 +5685,13 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
             pwd = post_params.get("check_password", "")
             pwd_strength = analyze_password_strength(pwd)
             summary = f"Strength: {pwd_strength.get('strength','N/A')}, Score: {pwd_strength.get('score',0)}/100, Issues: {len(pwd_strength.get('issues',[]))}"
+            
+            # --- START SAFE LOGGING ---
+            try:
+                log_safe_check(f"Score: {pwd_strength.get('score',0)}/100, Grade: {pwd_strength.get('grade','N/A')}")
+            except Exception as e:
+                print(f"[!] DB Log Error: {e}")
+            # --- END SAFE LOGGING ---
             data_given = f"Grade: {pwd_strength.get('grade','N/A')} | Crack Time: {pwd_strength.get('crack_time','N/A')} | Common: {pwd_strength.get('is_common',False)}"
             state_after = VIRTUAL_DB.get_state_snapshot()
             VIRTUAL_DB.log_activity(client_ip, client_port, ua, is_vpn, vpn_alert, vpn_name, vpn_address, state_before, state_after, "Password Strength", "Password analyzed (hidden)", data_given, summary)
@@ -5706,3 +5750,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nShutting down suite...")
         server.server_close()
+
