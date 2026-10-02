@@ -13,9 +13,7 @@ import socket
 import sqlite3
 import os
 
-DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database")
-os.makedirs(DB_DIR, exist_ok=True)
-DB_FILE = os.path.join(DB_DIR, "tool_database.db")
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_database.db")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -5150,6 +5148,7 @@ button:hover {{ background: #00ffab; box-shadow: 0 0 12px rgba(0, 255, 171, 0.4)
     <a href="/?tab=image" class="nav-item {t_active['image']}"><div class="nav-item-left"><span class="nav-icon">🔍</span> Reverse Image & Stego</div></a>
     <a href="/?tab=code" class="nav-item {t_active['code']}"><div class="nav-item-left"><span class="nav-icon">🦠</span> Malicious Code Analyzer</div></a>
     <a href="/?tab=forensics" class="nav-item {t_active['forensics']}"><div class="nav-item-left"><span class="nav-icon">🧰</span> Digital Forensic Toolkit</div></a>
+    <a href="/?tab=password" class="nav-item {t_active['password']}"><div class="nav-item-left"><span class="nav-icon">🔑</span> Password Strength Checker</div></a>
     <a href="/?tab=email" class="nav-item {t_active['email']}"><div class="nav-item-left"><span class="nav-icon">✉️</span> Email Security Analyzer</div></a>
     <a href="/?tab=url" class="nav-item {t_active['url']}"><div class="nav-item-left"><span class="nav-icon">🌐</span> Website & URL Phishing</div></a>
     <a href="/?tab=ip" class="nav-item {t_active['ip']}"><div class="nav-item-left"><span class="nav-icon">🛰️</span> IP Intelligence & Ports</div></a>
