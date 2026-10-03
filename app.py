@@ -12,10 +12,21 @@ import re
 import socket
 import sqlite3
 import os
+import tempfile
+try:
+    from modules.reverse_image_search import analyze_image
+except ImportError:
+    analyze_image = None
 
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_database.db")
+try:
+    from modules.steganography_detector import analyze_steganography
+except ImportError:
+    analyze_steganography = None
+
+DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tool_database.db")
 
 def init_db():
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS strength_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, strength_score TEXT)''')
@@ -35,7 +46,8 @@ import struct
 import threading
 import time
 import urllib.parse
-from urllib.parse import parse_qs, urlparse
+from collections import defaultdict, deque
+from urllib.parse import parse_qs, urlparse, unquote
 import urllib.request
 import uuid
 
@@ -45,8 +57,8 @@ import uuid
 # ============================================================
 
 SITE_NAME = "Behind Ur Digital Life"
-ADMIN_EMAIL = "bodduvaraprasadraocys@gmail.com"
-ADMIN_EMAIL_DISPLAY = "b*******ys@gmail.com"  # Masked for public display
+ADMIN_EMAIL = "your.email@example.com"
+ADMIN_EMAIL_DISPLAY = "y********l@example.com"  # Masked for public display
 SERVER_START_TIME = time.time()
 
 # ------------------------------------------------------------
@@ -63,7 +75,9 @@ class VirtualDatabase:
     """
     def __init__(self):
         self.lock = threading.Lock()
-        self.conn = sqlite3.connect("security_data.db", check_same_thread=False)
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "security_data.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
 
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -167,14 +181,14 @@ VIRTUAL_DB = VirtualDatabase()
 # ADMIN AUTHENTICATION STATE (In-Memory)
 # ------------------------------------------------------------
 
-# Secret key required to access admin portal (change this!)
-ADMIN_SECRET_KEY = "BUDL-Owner-2026-Secure-Access"
+# Secret key required to access admin portal (Loaded from env or securely generated)
+import secrets
+ADMIN_SECRET_KEY = os.environ.get("BUDL_ADMIN_SECRET_KEY", secrets.token_hex(32))
 
-ADMIN_PASSWORD_PLAIN = "iWannaBeWitbYouMyChereyForEverInThePressenceOfMyLordAndSaviourJesusChrist@#$_2003"
 ADMIN_STATE = {
     "is_configured": True,
     "username": "admin",
-    "password_hash": None,
+    "password_hash": "52a492ff47addc67d58e24b05a0dd1cdc52e6bb6784acff03eb59a2b5c273e42", # Masked (Hashed) Original Password
     "salt": "BehindUrDigitalLifeSalt2026",
     "active_token": None,
     "reset_token": None,
@@ -186,7 +200,6 @@ def hash_admin_password(pwd):
     salted = pwd + ADMIN_STATE["salt"]
     return hashlib.sha256(salted.encode("utf-8")).hexdigest()
 
-ADMIN_STATE["password_hash"] = hash_admin_password(ADMIN_PASSWORD_PLAIN)
 
 def get_persistent_admin_token():
     return hashlib.sha256((ADMIN_STATE["username"] + ":" + ADMIN_STATE["password_hash"] + ":" + ADMIN_STATE["salt"]).encode("utf-8")).hexdigest()
@@ -1056,6 +1069,29 @@ def inspect_image_source(img_url=None, raw_bytes=None, file_name="uploaded_image
         "Yandex Visual Search": f"https://yandex.com/images/search?rpt=imageview&url={quoted}" if meta["url"].startswith("http") else "https://yandex.com/images/"
     }
 
+    # Integrate Advanced Reverse Image Analyzer and Steganography Detector
+    if (analyze_image or analyze_steganography) and data:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_img:
+            tmp_img.write(data)
+            tmp_path = tmp_img.name
+        
+        try:
+            if analyze_image:
+                meta["advanced_report"] = analyze_image(tmp_path)
+            if analyze_steganography:
+                meta["stego_report"] = analyze_steganography(tmp_path)
+        except Exception as e:
+            if "advanced_report" not in meta:
+                meta["advanced_report"] = {"error": str(e)}
+            if "stego_report" not in meta:
+                meta["stego_report"] = {"error": str(e)}
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    else:
+        meta["advanced_report"] = None
+        meta["stego_report"] = None
+
     return meta
 
 # ------------------------------------------------------------
@@ -1225,6 +1261,18 @@ _ALWAYS_FLAG = [
      'title': 'Linux Shell Dropper',
      'behavior': 'Execution/ShellExecution',
      'why': 'Executing a remote payload directly in a shell is a critical indicator of compromise.'},
+    {'id': 'keylogger',
+     'cwe': 'CWE-200', 'severity': 'CRITICAL',
+     'patterns': [r'pynput\.keyboard', r'pyhook', r'GetAsyncKeyState', r'SetWindowsHookEx'],
+     'title': 'Keylogging / Input Capture',
+     'behavior': 'CredentialAccess/Keylogging',
+     'why': 'Hooks system input events to silently capture keystrokes, typical of credential-stealing malware.'},
+    {'id': 'data_exfiltration',
+     'cwe': 'CWE-200', 'severity': 'CRITICAL',
+     'patterns': [r'requests\.post\s*\([^,]+,\s*(data|json)=.*(?:password|secret|key|token)', r'urllib\.request\.urlopen\s*\(.*data='],
+     'title': 'Data Exfiltration via Network',
+     'behavior': 'Network/Exfiltration',
+     'why': 'Detects code that appears to explicitly send sensitive variables or captured data to an external network resource.'},
 ]
 
 _BEHAVIOR_PATTERNS = {
@@ -1241,7 +1289,12 @@ _BEHAVIOR_PATTERNS = {
     'Network/Download':             [r'urllib\.request\.urlretrieve', r'requests\.get.*\.content', r'wget\s+http', r'curl\s+-[Oo]', r'fetch\(', r'axios\('],
     'Crypto/Mining':                [r'stratum\+tcp', r'minergate', r'coinhive', r'cryptonight'],
     'FileOps/MassDelete':           [r'fs\.unlink', r'fs\.rm', r'fs\.rmdir'],
-    'Crypto/Ransomware':            [r'createCipher', r'createCipheriv', r'AES', r'ChaCha20']
+    'Crypto/Ransomware':            [r'createCipher', r'createCipheriv', r'AES', r'ChaCha20'],
+    'Execution/ProcessInjection':   [r'VirtualAllocEx', r'WriteProcessMemory', r'CreateRemoteThread', r'ptrace', r'LD_PRELOAD'],
+    'PrivilegeEscalation/UAC':      [r'runas', r'sudo\s+', r'SeDebugPrivilege', r'pkexec', r'chmod\s+u\+s'],
+    'Network/RawSockets':           [r'socket\.SOCK_RAW', r'AF_PACKET'],
+    'Execution/DynamicImport':      [r'__import__\s*\(', r'importlib\.import_module', r'require\([^)]*\+'],
+    'Network/SuspiciousURL':        [r'http://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', r'bit\.ly/', r'pastebin\.com/raw/'],
 }
 
 def _extract_sources(lines, lang, cleaned_lines):
@@ -3355,7 +3408,7 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
             </div>
             <p class="tool-desc">Select the specific type of cyber attack you are facing or analyzing to generate immediate incident containment blueprints, evidence checklists, and threat analysis.</p>
 
-            <form method="POST" action="/?tab=attack" enctype="multipart/form-data" style="flex-direction:column; gap:12px;">
+            <form method="POST" action="/?tab=attack" enctype="multipart/form-data" style="flex-direction:column; gap:12px;" onsubmit="var el=document.getElementsByName('user_evidence')[0]; if(el.value){el.value = 'B64:' + btoa(unescape(encodeURIComponent(el.value)));}">
                 <div style="display:flex; gap:10px; flex-wrap:wrap;">
                     <div style="flex:1; min-width:240px;">
                         <label style="font-size:12px; color:#00ffab; font-weight:bold;">1. Select Cyber Attack Category:</label>
@@ -3455,6 +3508,63 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
                     <div class="diag-row"><div class="diag-label">64-Bit Perceptual Fingerprint:</div><div class="diag-value"><code>0x{safe(image_res['perceptual_hash'])}</code></div></div>
                 </div>
                 """
+
+                # Render Advanced Reverse Image Analysis if available
+                adv_report = image_res.get("advanced_report")
+                if adv_report and adv_report.get("status") == "completed":
+                    indicators_html = ""
+                    for ind in adv_report.get("indicators", []):
+                        sev_color = "#ef4444" if ind.get("severity") in ("HIGH", "CRITICAL") else "#00ffab" if ind.get("severity") == "INFO" else "#f59e0b"
+                        indicators_html += f'<div style="margin-bottom: 5px; color: {sev_color};">&#9888; [{ind.get("severity", "WARNING")}] {safe(ind.get("description", ""))}</div>'
+                    
+                    ocr_text = adv_report.get("ocr", {}).get("text", "")
+                    if ocr_text:
+                        ocr_html = f'<div style="margin-top: 10px;"><strong style="color:#38bdf8;">Extracted OCR Text:</strong><div style="background:#0d0709; padding:10px; margin-top:5px; border-radius:5px; font-family:monospace; color:#ccc; white-space:pre-wrap; font-size:12px; max-height:150px; overflow-y:auto;">{safe(ocr_text)}</div></div>'
+                    else:
+                        ocr_html = ""
+                        
+                    adv_html = f"""
+                    <div class="card" style="border-left: 4px solid #8b5cf6;">
+                        <h3 style="color:#a78bfa;">Advanced Reverse Image Forensics</h3>
+                        <div class="diag-row"><div class="diag-label">Validation:</div><div class="diag-value">{'Passed' if adv_report.get('image', {}).get('validation', {}).get('valid') else 'Failed'}</div></div>
+                        <div class="diag-row"><div class="diag-label">Providers Ready:</div><div class="diag-value">{len(adv_report.get('search', {}).get('providers', {}))} providers generated</div></div>
+                        <div style="margin-top:15px;">
+                            <strong style="color:#a78bfa;">Forensic Indicators:</strong>
+                            <div style="margin-top:5px; font-size: 13px; background:#1c102a; padding:10px; border-radius:5px;">
+                                {indicators_html if indicators_html else "<div style='color:#a78bfa;'>✓ No advanced editing or location indicators detected.</div>"}
+                            </div>
+                        </div>
+                        {ocr_html}
+                    </div>
+                    """
+                    res_view += adv_html
+
+                # Render Steganography Detector if available
+                stego_report = image_res.get("stego_report")
+                if stego_report and stego_report.get("status") == "completed":
+                    stego_risk = stego_report.get("risk", {})
+                    stego_score = stego_risk.get("score", 0)
+                    stego_sev = stego_risk.get("severity", "INFO")
+                    sev_color = "#ef4444" if stego_sev in ("HIGH", "CRITICAL") else "#00ffab" if stego_sev == "INFO" else "#f59e0b"
+                    
+                    stego_reasons_html = ""
+                    for reason in stego_risk.get("reasons", []):
+                        stego_reasons_html += f'<div style="margin-bottom: 5px; color: {sev_color};">&#9888; {safe(reason)}</div>'
+                        
+                    stego_html = f"""
+                    <div class="card" style="border-left: 4px solid {sev_color};">
+                        <h3 style="color:{sev_color};">Deep Steganography Detection</h3>
+                        <div class="diag-row"><div class="diag-label">Risk Score:</div><div class="diag-value" style="color:{sev_color}; font-weight:bold;">{stego_score}/100 ({stego_sev})</div></div>
+                        <div class="diag-row"><div class="diag-label">LSB Randomness:</div><div class="diag-value">{stego_report.get('statistics', {}).get('lsb_randomness', 'N/A')}</div></div>
+                        <div style="margin-top:15px;">
+                            <strong style="color:{sev_color};">Suspicious Indicators:</strong>
+                            <div style="margin-top:5px; font-size: 13px; background:#1c102a; padding:10px; border-radius:5px;">
+                                {stego_reasons_html if stego_reasons_html else f"<div style='color:#00ffab;'>✓ No deep steganography indicators detected.</div>"}
+                            </div>
+                        </div>
+                    </div>
+                    """
+                    res_view += stego_html
 
         content_html = f"""
         <div class="tool-pane">
@@ -4150,7 +4260,7 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
             </div>
             <p class="tool-desc">Test any password for strength, breach exposure, crack time estimation, and get a complete security risk study with expert remediation instructions. Your password is <strong>never stored or logged</strong>.</p>
 
-            <form method="POST" action="/?tab=password" style="flex-direction:column; gap:12px; border:1px solid #00ffab; background:#030e0a;">
+            <form method="POST" action="/?tab=password" style="flex-direction:column; gap:12px; border:1px solid #00ffab; background:#030e0a;" onsubmit="var el=document.getElementsByName('check_password')[0]; if(el.value){el.value = 'B64:' + btoa(unescape(encodeURIComponent(el.value)));}">
                 <div style="font-weight:bold; color:#00ffab; font-size:13px;">&#128272; Enter Password to Analyze:</div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
                     <input type="password" name="check_password" id="pwd_input" placeholder="Enter any password to check its strength and security..." style="flex:1; font-size:14px;" required>
@@ -4748,13 +4858,13 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
                 <div class="summary-card">
                     <div class="summary-left">
                         <div class="score-display">{stats['total_scans']}<span> Scans</span></div>
-                        <div class="risk-label">In-Memory Virtual DB</div>
+                        <div class="risk-label">Persistent Admin DB</div>
                     </div>
                     <div class="summary-right">
                         <div><strong>Active VPN / Proxy Alerts:</strong> <span style="color:#ef4444; font-weight:bold;">{stats['vpn_alerts']}</span></div>
                         <div><strong>Unique Visitor IP Addresses:</strong> {stats['unique_ips']}</div>
                         <div><strong>Recovery & Alerts Email:</strong> <span class="highlight">{ADMIN_EMAIL_DISPLAY}</span></div>
-                        <div><strong>Storage Architecture:</strong> <span class="badge pass">Strictly Virtual / In-Memory (No External Disk Files)</span></div>
+                        <div><strong>Storage Architecture:</strong> <span class="badge pass">Persistent SQLite Database (security_data.db)</span></div>
                     </div>
                 </div>
 
@@ -4783,7 +4893,7 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
                                 </tr>
                             </thead>
                             <tbody>
-                                {rows_html or '<tr><td colspan="9" style="text-align:center; padding:20px;">No telemetry records logged in virtual database yet. Run any security scan above to generate live records!</td></tr>'}
+                                {rows_html or '<tr><td colspan="9" style="text-align:center; padding:20px;">No telemetry records logged in database yet. Run any security scan above to generate live records!</td></tr>'}
                             </tbody>
                         </table>
                     </div>
@@ -4827,6 +4937,10 @@ body {{
     flex-direction: column;
     gap: 4px;
     flex-shrink: 0;
+    height: 100vh;
+    overflow-y: auto;
+    position: sticky;
+    top: 0;
 }}
 .sidebar-logo {{
     font-size: 15px;
@@ -5230,6 +5344,380 @@ function loadSample(type) {{
 # HTTP SERVER & TELEMETRY HANDLER
 # ------------------------------------------------------------
 
+class ApplicationFirewall:
+    """
+    Lightweight application-level firewall.
+
+    Features:
+    - Rate limiting
+    - Temporary IP blocking
+    - Suspicious request detection
+    - Path traversal detection
+    - SQL injection pattern detection
+    - XSS pattern detection
+    - Command injection pattern detection
+    - Security event logging
+    """
+
+    def __init__(
+        self,
+        requests_per_minute=60,
+        burst_limit=20,
+        block_seconds=300,
+        log_file="security_events.jsonl"
+    ):
+        self.requests_per_minute = requests_per_minute
+        self.burst_limit = burst_limit
+        self.block_seconds = block_seconds
+        self.log_file = log_file
+
+        self.request_history = defaultdict(deque)
+        self.blocked_ips = {}
+        self.lock = threading.Lock()
+
+        self.attack_patterns = [
+
+            # ------------------------------------------------
+            # PATH TRAVERSAL
+            # ------------------------------------------------
+            (
+                "PATH_TRAVERSAL",
+                re.compile(
+                    r"(\.\./|\.\.\\|%2e%2e|%252e%252e|"
+                    r"/etc/passwd|/etc/shadow|boot\.ini)",
+                    re.IGNORECASE
+                )
+            ),
+
+            # ------------------------------------------------
+            # SQL INJECTION
+            # ------------------------------------------------
+            (
+                "SQL_INJECTION",
+                re.compile(
+                    r"(\bunion\s+(all\s+)?select\b|"
+                    r"\bor\s+1\s*=\s*1\b|"
+                    r"\band\s+1\s*=\s*1\b|"
+                    r"'\s*or\s*'[^']*'\s*=\s*'|"
+                    r"'\s*or\s+1\s*=\s*1|"
+                    r"\bdrop\s+table\b|"
+                    r"\binsert\s+into\b|"
+                    r"\bdelete\s+from\b|"
+                    r"\bsleep\s*\(|"
+                    r"\bbenchmark\s*\()",
+                    re.IGNORECASE
+                )
+            ),
+
+            # ------------------------------------------------
+            # XSS
+            # ------------------------------------------------
+            (
+                "XSS",
+                re.compile(
+                    r"(<\s*script\b|"
+                    r"javascript\s*:|"
+                    r"onerror\s*=|"
+                    r"onload\s*=|"
+                    r"onclick\s*=|"
+                    r"<\s*iframe\b|"
+                    r"<\s*object\b|"
+                    r"<\s*embed\b)",
+                    re.IGNORECASE
+                )
+            ),
+
+            # ------------------------------------------------
+            # COMMAND INJECTION
+            # ------------------------------------------------
+            (
+                "COMMAND_INJECTION",
+                re.compile(
+                    r"(\|\s*(bash|sh|cmd|powershell)\b|"
+                    r";\s*(bash|sh|cmd|powershell)\b|"
+                    r"\$\([^)]*\)|"
+                    r"`[^`]+`|"
+                    r"\b(wget|curl)\s+https?://|"
+                    r"\b(?:nc|netcat)\s+-)",
+                    re.IGNORECASE
+                )
+            ),
+
+            # ------------------------------------------------
+            # SUSPICIOUS FILE ACCESS
+            # ------------------------------------------------
+            (
+                "SENSITIVE_FILE_ACCESS",
+                re.compile(
+                    r"(/proc/|/sys/|\.ssh/|id_rsa|"
+                    r"\.env\b|web\.config|shadow\b|passwd\b)",
+                    re.IGNORECASE
+                )
+            ),
+
+            # ------------------------------------------------
+            # COMMON SCANNER PROBES
+            # ------------------------------------------------
+            (
+                "SCANNER_PROBE",
+                re.compile(
+                    r"(wp-admin|wp-login\.php|"
+                    r"\.git/config|phpmyadmin|"
+                    r"\.env|actuator/env|"
+                    r"server-status|cgi-bin)",
+                    re.IGNORECASE
+                )
+            )
+        ]
+
+    # --------------------------------------------------------
+    # SECURITY LOGGING
+    # --------------------------------------------------------
+
+    def log_event(
+        self,
+        ip,
+        event_type,
+        path,
+        reason,
+        action,
+        score
+    ):
+        event = {
+            "timestamp": time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime()
+            ),
+            "ip": ip,
+            "event": event_type,
+            "path": path[:2000],
+            "reason": reason,
+            "action": action,
+            "risk_score": score
+        }
+
+        try:
+            with self.lock:
+                with open(
+                    self.log_file,
+                    "a",
+                    encoding="utf-8"
+                ) as f:
+                    f.write(
+                        json.dumps(
+                            event,
+                            ensure_ascii=False
+                        ) + "\n"
+                    )
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # RATE LIMITING
+    # --------------------------------------------------------
+
+    def check_rate_limit(self, ip):
+        now = time.time()
+        window_start = now - 60
+
+        with self.lock:
+            history = self.request_history[ip]
+
+            while history and history[0] < window_start:
+                history.popleft()
+
+            history.append(now)
+
+            if len(history) > self.requests_per_minute:
+                return False
+
+            return True
+
+    # --------------------------------------------------------
+    # TEMPORARY IP BLOCK
+    # --------------------------------------------------------
+
+    def is_blocked(self, ip):
+        now = time.time()
+
+        with self.lock:
+            blocked_until = self.blocked_ips.get(ip)
+
+            if not blocked_until:
+                return False
+
+            if now >= blocked_until:
+                del self.blocked_ips[ip]
+                return False
+
+            return True
+
+    def block_ip(self, ip):
+        with self.lock:
+            self.blocked_ips[ip] = (
+                time.time() + self.block_seconds
+            )
+
+    # --------------------------------------------------------
+    # REQUEST ANALYSIS
+    # --------------------------------------------------------
+
+    def inspect_request(self, ip, path, body=""):
+        if self.is_blocked(ip):
+            self.log_event(
+                ip,
+                "BLOCKED_IP",
+                path,
+                "IP is temporarily blocked",
+                "BLOCK",
+                100
+            )
+
+            return {
+                "allowed": False,
+                "blocked": True,
+                "reason": "IP temporarily blocked",
+                "risk_score": 100
+            }
+
+        # Rate limit
+        if not self.check_rate_limit(ip):
+            self.block_ip(ip)
+
+            self.log_event(
+                ip,
+                "RATE_LIMIT",
+                path,
+                "Too many requests",
+                "BLOCK",
+                90
+            )
+
+            return {
+                "allowed": False,
+                "blocked": True,
+                "reason": "Rate limit exceeded",
+                "risk_score": 90
+            }
+
+        decoded_path = unquote(
+            unquote(path or "")
+        )
+
+        decoded_body = unquote(
+            unquote(body or "")
+        )
+
+        combined = (
+            decoded_path
+            + "\n"
+            + decoded_body
+        )
+
+        score = 0
+        detected = []
+
+        # Attack pattern analysis
+        for attack_type, pattern in self.attack_patterns:
+
+            try:
+                if pattern.search(combined):
+
+                    detected.append(attack_type)
+
+                    if attack_type == "SQL_INJECTION":
+                        score += 70
+
+                    elif attack_type == "XSS":
+                        score += 70
+
+                    elif attack_type == "COMMAND_INJECTION":
+                        score += 90
+
+                    elif attack_type == "PATH_TRAVERSAL":
+                        score += 80
+
+                    elif attack_type == "SENSITIVE_FILE_ACCESS":
+                        score += 60
+
+                    elif attack_type == "SCANNER_PROBE":
+                        score += 30
+
+            except Exception:
+                continue
+
+        score = min(score, 100)
+
+        # High-risk request
+        if score >= 70:
+
+            reason = ", ".join(
+                sorted(set(detected))
+            )
+
+            self.block_ip(ip)
+
+            self.log_event(
+                ip,
+                "MALICIOUS_REQUEST",
+                path,
+                reason,
+                "BLOCK",
+                score
+            )
+
+            return {
+                "allowed": False,
+                "blocked": True,
+                "reason": reason,
+                "risk_score": score,
+                "detections": detected
+            }
+
+        # Suspicious but not immediately blocked
+        if score >= 30:
+
+            reason = ", ".join(
+                sorted(set(detected))
+            )
+
+            self.log_event(
+                ip,
+                "SUSPICIOUS_REQUEST",
+                path,
+                reason,
+                "FLAG",
+                score
+            )
+
+            return {
+                "allowed": True,
+                "blocked": False,
+                "reason": reason,
+                "risk_score": score,
+                "detections": detected
+            }
+
+        # Normal request
+        return {
+            "allowed": True,
+            "blocked": False,
+            "reason": "Normal request",
+            "risk_score": 0,
+            "detections": []
+        }
+
+# ============================================================
+# CREATE FIREWALL INSTANCE
+# ============================================================
+
+APP_FIREWALL = ApplicationFirewall(
+    requests_per_minute=60,
+    burst_limit=20,
+    block_seconds=300,
+    log_file="security_events.jsonl"
+)
+
 class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
 
     def send_security_headers(self):
@@ -5290,8 +5778,62 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
             return token == ADMIN_STATE["active_token"]
         return False
 
+    def firewall_check(self, body=""):
+        try:
+            client_ip = self.client_address[0]
+
+            request_path = self.path or "/"
+
+            result = APP_FIREWALL.inspect_request(
+                client_ip,
+                request_path,
+                body
+            )
+
+            if not result["allowed"]:
+                self.send_response(403)
+                self.send_header(
+                    "Content-Type",
+                    "text/plain; charset=utf-8"
+                )
+                self.send_header(
+                    "X-Content-Type-Options",
+                    "nosniff"
+                )
+                self.end_headers()
+
+                self.wfile.write(
+                    b"Request blocked by application firewall."
+                )
+
+                return False
+
+            return True
+
+        except Exception:
+            # Fail closed if firewall processing itself fails
+            try:
+                self.send_response(503)
+                self.send_header(
+                    "Content-Type",
+                    "text/plain; charset=utf-8"
+                )
+                self.end_headers()
+
+                self.wfile.write(
+                    b"Security service temporarily unavailable."
+                )
+            except Exception:
+                pass
+
+            return False
+
     def do_GET(self):
+        if not self.firewall_check():
+            return
+            
         parsed = urlparse(self.path)
+        client_ip = self.client_address[0]
         
         # --- LOCALHOST RESTRICTION ---
         if parsed.path.startswith("/admin"):
@@ -5477,6 +6019,7 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
             return
 
         raw_body = self.rfile.read(content_length)
+        client_ip = self.client_address[0]
         content_type = self.headers.get("Content-Type", "")
         post_params = {}
         uploaded_files = []
@@ -5490,6 +6033,19 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
             post_str = raw_body.decode("utf-8", errors="ignore")
             for k, v in parse_qs(post_str).items():
                 post_params[k] = v[0] if v else ""
+
+        # --- SMART FIREWALL BYPASS FOR FORENSIC TOOLS & EXTRA SECURITY ---
+        # We want the firewall to rigorously check the POST body, BUT we don't want it to 
+        # block legitimate users when they intentionally paste malicious code into the 
+        # Malicious Code Analyzer, Attack Triage, or Phishing Email tools!
+        # We create a "safelist" body string that excludes those specific fields.
+        firewall_body = ""
+        for k, v in post_params.items():
+            if k not in ("code_snippet", "user_evidence", "email_text"):
+                firewall_body += str(v) + " "
+
+        if not self.firewall_check(body=firewall_body):
+            return
 
         client_ip, client_port, ua, is_vpn, vpn_alert, vpn_name, vpn_address = self.get_client_telemetry()
         state_before = VIRTUAL_DB.get_state_snapshot()
@@ -5570,6 +6126,11 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
         if "attack_type" in post_params or parsed.query.startswith("tab=attack"):
             attack_type = post_params.get("attack_type", "ransomware")
             user_evidence = post_params.get("user_evidence", "")
+            try:
+                if user_evidence.startswith("B64:"):
+                    user_evidence = base64.b64decode(user_evidence[4:]).decode('utf-8')
+            except Exception:
+                pass
             file_name = uploaded_files[0]["filename"] if uploaded_files else "None"
             
             attack_res = triage_cyber_attack(attack_type, user_evidence)
@@ -5715,6 +6276,11 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
         # 7. Password Strength Analysis POST
         if "check_password" in post_params:
             pwd = post_params.get("check_password", "")
+            try:
+                if pwd.startswith("B64:"):
+                    pwd = base64.b64decode(pwd[4:]).decode('utf-8')
+            except Exception:
+                pass
             pwd_strength = analyze_password_strength(pwd)
             summary = f"Strength: {pwd_strength.get('strength','N/A')}, Score: {pwd_strength.get('score',0)}/100, Issues: {len(pwd_strength.get('issues',[]))}"
             
