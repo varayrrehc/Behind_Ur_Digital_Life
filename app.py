@@ -3408,7 +3408,7 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
             </div>
             <p class="tool-desc">Select the specific type of cyber attack you are facing or analyzing to generate immediate incident containment blueprints, evidence checklists, and threat analysis.</p>
 
-            <form method="POST" action="/?tab=attack" enctype="multipart/form-data" style="flex-direction:column; gap:12px;" onsubmit="var el=document.getElementsByName('user_evidence')[0]; if(el.value){el.value = 'B64:' + btoa(unescape(encodeURIComponent(el.value)));}">
+            <form method="POST" action="/?tab=attack" enctype="multipart/form-data" style="flex-direction:column; gap:12px;" onsubmit="var el=document.getElementsByName('user_evidence')[0]; if(el.value && !el.value.startsWith('REV:')){el.value = 'REV:' + el.value.split('').reverse().join('');}">
                 <div style="display:flex; gap:10px; flex-wrap:wrap;">
                     <div style="flex:1; min-width:240px;">
                         <label style="font-size:12px; color:#00ffab; font-weight:bold;">1. Select Cyber Attack Category:</label>
@@ -4260,7 +4260,7 @@ def render_dashboard(active_tab="email", result=None, err_msg="", submitted_val=
             </div>
             <p class="tool-desc">Test any password for strength, breach exposure, crack time estimation, and get a complete security risk study with expert remediation instructions. Your password is <strong>never stored or logged</strong>.</p>
 
-            <form method="POST" action="/?tab=password" style="flex-direction:column; gap:12px; border:1px solid #00ffab; background:#030e0a;" onsubmit="var el=document.getElementsByName('check_password')[0]; if(el.value){el.value = 'B64:' + btoa(unescape(encodeURIComponent(el.value)));}">
+            <form method="POST" action="/?tab=password" style="flex-direction:column; gap:12px; border:1px solid #00ffab; background:#030e0a;" onsubmit="var el=document.getElementsByName('check_password')[0]; if(el.value && !el.value.startsWith('REV:')){el.value = 'REV:' + el.value.split('').reverse().join('');}">
                 <div style="font-weight:bold; color:#00ffab; font-size:13px;">&#128272; Enter Password to Analyze:</div>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
                     <input type="password" name="check_password" id="pwd_input" placeholder="Enter any password to check its strength and security..." style="flex:1; font-size:14px;" required>
@@ -6127,7 +6127,9 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
             attack_type = post_params.get("attack_type", "ransomware")
             user_evidence = post_params.get("user_evidence", "")
             try:
-                if user_evidence.startswith("B64:"):
+                if user_evidence.startswith("REV:"):
+                    user_evidence = user_evidence[4:][::-1]
+                elif user_evidence.startswith("B64:"):
                     user_evidence = base64.b64decode(user_evidence[4:]).decode('utf-8')
             except Exception:
                 pass
@@ -6277,7 +6279,9 @@ class BehindUrDigitalLifeHandler(BaseHTTPRequestHandler):
         if "check_password" in post_params:
             pwd = post_params.get("check_password", "")
             try:
-                if pwd.startswith("B64:"):
+                if pwd.startswith("REV:"):
+                    pwd = pwd[4:][::-1]
+                elif pwd.startswith("B64:"):
                     pwd = base64.b64decode(pwd[4:]).decode('utf-8')
             except Exception:
                 pass
